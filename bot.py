@@ -1,69 +1,47 @@
 import os
 import yt_dlp
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-if not os.path.exists("downloads"):
-    os.makedirs("downloads")
-
-user_links = {}
-
-CAPTION = "*POWERED BY:- @ANIME_TV_INDIA*\n*@@Video_Saver_MGbot*"
-
-# ========== COOL PROGRESS BAR ==========
-def progress_bar(percent):
-    p = int(percent.replace('%','').strip())
-    filled = int(p / 10)
-    bar = "🟩" * filled + "⬜" * (10 - filled)
-    return f"{bar} {percent}"
-
-def progress_hook(d, msg):
-    if d['status'] == 'downloading':
-        percent = d.get('_percent_str', '0%')
-        speed = d.get('_speed_str', '')
-        eta = d.get('_eta_str', '')
-        try:
-            msg.edit_text(
-                f"📥 Downloading...\n{progress_bar(percent)}\n⚡ {speed} | ⏳ ETA {eta}"
-            )
-        except:
-            pass
-
-# ========== COMMANDS ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Send video link\n\nCommands:\n"
-        "/start - Start bot\n"
-        "/help - Help\n"
-        "/about - Bot info"
-    )
+    await update.message.reply_text("Send video link 🎬")
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send any video link and choose quality 🎬")
-
-async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚡ Advanced Video Saver Bot")
-
-# ========== LINK ==========
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
-    user_links[update.message.chat_id] = url
+    msg = await update.message.reply_text("Downloading... ⏬")
 
-    keyboard = [
-        [InlineKeyboardButton("240p", callback_data="240"),
-         InlineKeyboardButton("360p", callback_data="360")],
-        [InlineKeyboardButton("480p", callback_data="480"),
-         InlineKeyboardButton("720p 🚀", callback_data="720")],
-        [InlineKeyboardButton("1080p", callback_data="1080")],
-        [InlineKeyboardButton("🎵 MP3", callback_data="mp3")]
-    ]
+    ydl_opts = {
+        'format': 'bestvideo+bestaudio/best',
+        'outtmpl': 'video.%(ext)s',
+        'merge_output_format': 'mp4',
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0',
+        },
+        'quiet': True,
+        'noplaylist': True,
+    }
 
-    await update.message.reply_text("Select format ⬇️",
-        reply_markup=InlineKeyboardMarkup(keyboard))
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_name = ydl.prepare_filename(info)
+            if not file_name.endswith(".mp4"):
+                file_name = file_name.rsplit(".", 1)[0] + ".mp4"
 
-# ========== DOWNLOAD ==========
+        await update.message.reply_video(video=open(file_name, 'rb'))
+        os.remove(file_name)
+        await msg.delete()
+
+    except Exception as e:
+        await msg.edit_text(f"Error ❌ {e}")
+
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
+
+app.run_polling()# ========== DOWNLOAD ==========
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
