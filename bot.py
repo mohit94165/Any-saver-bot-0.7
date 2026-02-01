@@ -1,68 +1,202 @@
 import os
 import logging
-import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import yt_dlp
-from moviepy.editor import VideoFileClip
-import tempfile
-import re
+import asyncio
 
-# Configure logging
+# Setup logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Bot configuration
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 8080))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+# Get bot token
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.error("❌ ERROR: BOT_TOKEN not set!")
+    logger.error("Add BOT_TOKEN in Railway Variables")
+    exit(1)
 
-# Store user data
-user_data = {}
+# Create downloads folder
+os.makedirs("downloads", exist_ok=True)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a welcome message when the command /start is issued."""
-    welcome_text = """
-    🎬 *Video Downloader Bot*
+class WorkingBot:
+    def __init__(self):
+        self.ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'outtmpl': 'downloads/%(title)s.%(ext)s',
+        }
     
-    I can download videos from various platforms and convert them to audio!
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start command"""
+        await update.message.reply_text(
+            "🤖 *Video Downloader Bot*\n\n"
+            "Send me any video URL from:\n"
+            "• YouTube\n• TikTok\n• Instagram\n• Facebook\n• Twitter\n• 1000+ sites\n\n"
+            "⚡ Just send the URL!",
+            parse_mode='Markdown'
+        )
     
-    *Supported sites:*
-    • YouTube
-    • Twitter/X
-    • Instagram
-    • TikTok
-    • Facebook
-    • Many more...
+    async def handle_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle video URL"""
+        url = update.message.text.strip()
+        
+        if not url.startswith(('http://', 'https://')):
+            await update.message.reply_text("❌ Send a valid URL starting with http:// or https://")
+            return
+        
+        # Show processing
+        msg = await update.message.reply_text("🔍 Checking video...")
+        
+        try:
+            # Get video info
+            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                # Create buttons
+                keyboard = [
+                    [InlineKeyboardButton("🎬 Video", callback_data=f"video:{url}")],
+                    [InlineKeyboardButton("🎵 Audio Only", callback_data=f"audio:{url}")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Send info
+                await msg.edit_text(
+                    f"📹 *Found!*\n\n"
+                    f"**Title:** {info.get('title', 'Unknown')}\n"
+                    f"**Duration:** {info.get('duration', 0)}s\n"
+                    f"**Uploader:** {info.get('uploader', 'Unknown')}\n\n"
+                    f"Select download type:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+                
+        except Exception as e:
+            await msg.edit_text(f"❌ Error: {str(e)}")
     
-    *How to use:*
-    1. Send me a video URL
-    2. Choose quality/format
-    3. I'll download and send it to you
+    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle button clicks"""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        
+        if data.startswith("video:"):
+            url = data.split(":", 1)[1]
+            await self.download_video(query, url)
+        
+        elif data.startswith("audio:"):
+            url = data.split(":", 1)[1]
+            await self.download_audio(query, url)
     
-    *Commands:*
-    /start - Show this message
-    /help - Get help
-    /audio - Convert video to audio only
-    """
+    async def download_video(self, query, url: str):
+        """Download video"""
+        msg = await query.message.reply_text("⏬ Downloading video...")
+        
+        try:
+            ydl_opts = {
+                'format': 'best[filesize<50M]',  # Limit to 50MB for Telegram
+                'outtmpl': 'downloads/%(title)s.%(ext)s',
+                'quiet': True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+                
+                # Check file size
+                if os.path.exists(filename):
+                    file_size = os.path.getsize(filename)
+                    
+                    if file_size > 50 * 1024 * 1024:  # 50MB
+                        os.remove(filename)
+                        await msg.edit_text("❌ File too large (>50MB). Try shorter video.")
+                        return
+                    
+                    await msg.edit_text("📤 Uploading...")
+                    
+                    # Send video
+                    with open(filename, 'rb') as f:
+                        await query.message.reply_video(
+                            video=f,
+                            caption=f"✅ {info.get('title', 'Video')}",
+                            supports_streaming=True
+                        )
+                    
+                    await msg.delete()
+                    os.remove(filename)
+                else:
+                    await msg.edit_text("❌ Download failed. File not created.")
+                    
+        except Exception as e:
+            await msg.edit_text(f"❌ Error: {str(e)}")
     
-    await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
+    async def download_audio(self, query, url: str):
+        """Download audio"""
+        msg = await query.message.reply_text("🎵 Extracting audio...")
+        
+        try:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'outtmpl': 'downloads/%(title)s.%(ext)s',
+                'quiet': True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+                filename = filename.rsplit('.', 1)[0] + '.mp3'
+                
+                if os.path.exists(filename):
+                    await msg.edit_text("📤 Uploading audio...")
+                    
+                    with open(filename, 'rb') as f:
+                        await query.message.reply_audio(
+                            audio=f,
+                            caption=f"🎵 {info.get('title', 'Audio')}"
+                        )
+                    
+                    await msg.delete()
+                    os.remove(filename)
+                else:
+                    await msg.edit_text("❌ Audio extraction failed")
+                    
+        except Exception as e:
+            await msg.edit_text(f"❌ Error: {str(e)}")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a help message."""
-    help_text = """
-    *Help Guide*
+def main():
+    """Start bot - FIXED for Railway"""
+    print("🚀 Starting Video Downloader Bot...")
+    print(f"✅ Token: {BOT_TOKEN[:10]}...")
     
-    Just send me a video URL and I'll handle the rest!
+    # Create application with persistence disabled
+    application = Application.builder().token(BOT_TOKEN).build()
     
-    *Features:*
-    • Download videos in different qualities
-    • Convert to audio (MP3)
-    • Progress indicators
+    # Initialize bot
+    bot = WorkingBot()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", bot.start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_url))
+    application.add_handler(CallbackQueryHandler(bot.button_handler))
+    
+    # Start bot with proper settings for Railway
+    print("🤖 Bot is ready on Railway!")
+    application.run_polling(
+        drop_pending_updates=True,
+        close_loop=False  # Important for Railway
+    )
+
+if __name__ == '__main__':
+    main()    • Progress indicators
     • Support for 1000+ sites
     
     *Note:* Some sites may have restrictions.
